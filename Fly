@@ -1,184 +1,327 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
 
-local event = ReplicatedStorage:WaitForChild("FlingEvent")
+local REMOTE_NAME = "FlingEvent"
 
--- ⚙️ CONFIGURAÇÃO DA FORÇA
-local PRESETS = {
-	Baixo = { horizontal = 40,  vertical = 30 },
-	Medio = { horizontal = 70,  vertical = 55 },
-	Alto  = { horizontal = 100, vertical = 90 },
+----------------------------------------------------------------
+-- ⚙️ CONFIGURAÇÃO
+----------------------------------------------------------------
+local CONFIG = {
+	-- força (o slider vai de 1 a 100)
+	MIN_HORIZONTAL = 30,
+	MAX_HORIZONTAL = 110,
+	MIN_VERTICAL = 25,
+	MAX_VERTICAL = 95,
+	PRESETS = { Baixo = 25, Medio = 55, Alto = 90 },
+
+	MAX_DISTANCE = 60, -- distância máxima até o alvo
+	COOLDOWN = 1.5,    -- segundos entre arremessos
+
+	-- limites do mapa (ninguém sai daqui)
+	MAP_RADIUS = 400,
+	MIN_Y = -50,
 }
-local MAX_DISTANCE = 50   -- distância máxima para arremessar
-local COOLDOWN = 1.5      -- segundos entre arremessos
 
--- 🗺️ LIMITES DO MAPA
-local MAP_RADIUS = 400    -- distância máxima do centro (0,0,0)
-local MIN_Y = -50         -- altura mínima
+----------------------------------------------------------------
+-- 🖧 SERVIDOR
+----------------------------------------------------------------
+if RunService:IsServer() then
+	local remote = ReplicatedStorage:FindFirstChild(REMOTE_NAME) or Instance.new("RemoteEvent")
+	remote.Name = REMOTE_NAME
+	remote.Parent = ReplicatedStorage
 
-local lastUse = {}
-local lastSafe = {}
+	local lastUse, lastSafe = {}, {}
 
-event.OnServerEvent:Connect(function(player, targetPlayer, presetName)
-	if typeof(targetPlayer) ~= "Instance" or not targetPlayer:IsA("Player") then return end
-	if targetPlayer == player then return end
+	-- entrega a interface para o jogador (clone deste script rodando no cliente)
+	local function giveUI(player)
+		local pg = player:WaitForChild("PlayerGui")
+		if pg:FindFirstChild("FlingClient") then return end
+		local copy = script:Clone()
+		copy.Name = "FlingClient"
+		copy.RunContext = Enum.RunContext.Client
+		copy.Parent = pg
+	end
 
-	local preset = PRESETS[presetName]
-	if not preset then return end
+	Players.PlayerAdded:Connect(giveUI)
+	for _, p in ipairs(Players:GetPlayers()) do
+		task.spawn(giveUI, p)
+	end
 
-	local now = os.clock()
-	if lastUse[player] and now - lastUse[player] < COOLDOWN then return end
+	remote.OnServerEvent:Connect(function(player, targetPlayer, power)
+		if typeof(targetPlayer) ~= "Instance" or not targetPlayer:IsA("Player") then return end
+		if targetPlayer == player then return end
 
-	local myRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-	local targetChar = targetPlayer.Character
-	local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
-	if not myRoot or not targetRoot then return end
-	if (myRoot.Position - targetRoot.Position).Magnitude > MAX_DISTANCE then return end
+		power = math.clamp(tonumber(power) or 0, 1, 100)
 
-	lastUse[player] = now
+		local now = os.clock()
+		if lastUse[player] and now - lastUse[player] < CONFIG.COOLDOWN then return end
 
-	local flat = (targetRoot.Position - myRoot.Position) * Vector3.new(1, 0, 1)
-	local dir = flat.Magnitude > 0 and flat.Unit or myRoot.CFrame.LookVector
+		local myRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+		local targetChar = targetPlayer.Character
+		local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
+		if not myRoot or not targetRoot then return end
+		if (myRoot.Position - targetRoot.Position).Magnitude > CONFIG.MAX_DISTANCE then return end
 
-	-- servidor assume a física por um instante para o impulso funcionar
-	pcall(function() targetRoot:SetNetworkOwner(nil) end)
-	targetRoot.AssemblyLinearVelocity = dir * preset.horizontal + Vector3.new(0, preset.vertical, 0)
+		lastUse[player] = now
 
-	local hum = targetChar:FindFirstChildOfClass("Humanoid")
-	if hum then hum:ChangeState(Enum.HumanoidStateType.FallingDown) end
+		local t = power / 100
+		local horizontal = CONFIG.MIN_HORIZONTAL + t * (CONFIG.MAX_HORIZONTAL - CONFIG.MIN_HORIZONTAL)
+		local vertical = CONFIG.MIN_VERTICAL + t * (CONFIG.MAX_VERTICAL - CONFIG.MIN_VERTICAL)
 
-	task.delay(1, function()
-		if targetRoot and targetRoot.Parent then
-			pcall(function() targetRoot:SetNetworkOwnershipAuto() end)
-		end
+		local flat = (targetRoot.Position - myRoot.Position) * Vector3.new(1, 0, 1)
+		local dir = flat.Magnitude > 0 and flat.Unit or myRoot.CFrame.LookVector
+
+		pcall(function() targetRoot:SetNetworkOwner(nil) end)
+		targetRoot.AssemblyLinearVelocity = dir * horizontal + Vector3.new(0, vertical, 0)
+
+		local hum = targetChar:FindFirstChildOfClass("Humanoid")
+		if hum then hum:ChangeState(Enum.HumanoidStateType.FallingDown) end
+
+		task.delay(1, function()
+			if targetRoot and targetRoot.Parent then
+				pcall(function() targetRoot:SetNetworkOwnershipAuto() end)
+			end
+		end)
 	end)
-end)
 
--- 🛟 Mantém todo mundo dentro do mapa
-task.spawn(function()
-	while true do
-		task.wait(0.2)
-		for _, plr in ipairs(Players:GetPlayers()) do
-			local char = plr.Character
-			local root = char and char:FindFirstChild("HumanoidRootPart")
-			local hum = char and char:FindFirstChildOfClass("Humanoid")
-			if root and hum then
-				local pos = root.Position
-				local flatDist = (pos * Vector3.new(1, 0, 1)).Magnitude
-				if flatDist > MAP_RADIUS or pos.Y < MIN_Y then
-					if lastSafe[plr] then
-						root.AssemblyLinearVelocity = Vector3.zero
-						root.CFrame = lastSafe[plr]
+	-- 🛟 mantém todo mundo dentro do mapa
+	task.spawn(function()
+		while true do
+			task.wait(0.2)
+			for _, plr in ipairs(Players:GetPlayers()) do
+				local char = plr.Character
+				local root = char and char:FindFirstChild("HumanoidRootPart")
+				local hum = char and char:FindFirstChildOfClass("Humanoid")
+				if root and hum then
+					local pos = root.Position
+					local flatDist = (pos * Vector3.new(1, 0, 1)).Magnitude
+					if flatDist > CONFIG.MAP_RADIUS or pos.Y < CONFIG.MIN_Y then
+						if lastSafe[plr] then
+							root.AssemblyLinearVelocity = Vector3.zero
+							root.CFrame = lastSafe[plr]
+						end
+					elseif hum.FloorMaterial ~= Enum.Material.Air then
+						lastSafe[plr] = root.CFrame + Vector3.new(0, 3, 0)
 					end
-				elseif hum.FloorMaterial ~= Enum.Material.Air then
-					lastSafe[plr] = root.CFrame + Vector3.new(0, 3, 0)
 				end
 			end
 		end
-	end
-end)
+	end)
 
-Players.PlayerRemoving:Connect(function(p)
-	lastUse[p] = nil
-	lastSafe[p] = nil
-end)
+	Players.PlayerRemoving:Connect(function(p)
+		lastUse[p], lastSafe[p] = nil, nil
+	end)
 
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService = game:GetService("TweenService")
+	return
+end
 
+----------------------------------------------------------------
+-- 🖥️ CLIENTE (interface)
+----------------------------------------------------------------
 local player = Players.LocalPlayer
+local remote = ReplicatedStorage:WaitForChild(REMOTE_NAME)
 local mouse = player:GetMouse()
-local event = ReplicatedStorage:WaitForChild("FlingEvent")
 
 local RED = Color3.fromRGB(255, 40, 60)
 local CYAN = Color3.fromRGB(0, 230, 255)
 local DARK = Color3.fromRGB(12, 12, 20)
+local PANEL = Color3.fromRGB(25, 25, 38)
 
-local selected = "Medio"
+local power = CONFIG.PRESETS.Medio
+local armed = true
 
--- 🖥️ INTERFACE
+local function round(o, r)
+	Instance.new("UICorner", o).CornerRadius = UDim.new(0, r or 8)
+end
+local function stroke(o, c, t)
+	local s = Instance.new("UIStroke")
+	s.Color, s.Thickness = c, t or 1.5
+	s.Parent = o
+	return s
+end
+
+local old = player.PlayerGui:FindFirstChild("FlingGui")
+if old then old:Destroy() end
+
 local gui = Instance.new("ScreenGui")
 gui.Name = "FlingGui"
 gui.ResetOnSpawn = false
-gui.Parent = player:WaitForChild("PlayerGui")
+gui.Parent = player.PlayerGui
 
-local frame = Instance.new("Frame")
-frame.Size = UDim2.fromOffset(240, 190)
-frame.Position = UDim2.new(0, 20, 0.5, -95)
-frame.BackgroundColor3 = DARK
-frame.BackgroundTransparency = 0.1
-frame.Parent = gui
-Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 10)
+local window = Instance.new("Frame")
+window.Size = UDim2.fromOffset(260, 0)
+window.AutomaticSize = Enum.AutomaticSize.Y
+window.Position = UDim2.new(0, 20, 0.5, -130)
+window.BackgroundColor3 = DARK
+window.BackgroundTransparency = 0.08
+window.Parent = gui
+round(window, 10)
+stroke(window, RED, 2)
 
-local stroke = Instance.new("UIStroke", frame)
-stroke.Color = RED
-stroke.Thickness = 2
+local layout = Instance.new("UIListLayout")
+layout.Padding = UDim.new(0, 8)
+layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+layout.SortOrder = Enum.SortOrder.LayoutOrder
+layout.Parent = window
 
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, 0, 0, 36)
-title.BackgroundTransparency = 1
-title.Text = "⚡ FLING SYSTEM"
-title.Font = Enum.Font.Michroma
-title.TextSize = 14
-title.TextColor3 = CYAN
-title.Parent = frame
+local pad = Instance.new("UIPadding", window)
+pad.PaddingBottom = UDim.new(0, 12)
+
+-- título (arrastável)
+local bar = Instance.new("TextLabel")
+bar.Size = UDim2.new(1, 0, 0, 36)
+bar.BackgroundTransparency = 1
+bar.Text = "⚡ FLING SYSTEM"
+bar.Font = Enum.Font.Michroma
+bar.TextSize = 14
+bar.TextColor3 = CYAN
+bar.LayoutOrder = 0
+bar.Parent = window
+
+local dragging, dragStart, startPos
+bar.InputBegan:Connect(function(i)
+	if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+		dragging, dragStart, startPos = true, i.Position, window.Position
+	end
+end)
+UserInputService.InputChanged:Connect(function(i)
+	if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+		local d = i.Position - dragStart
+		window.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+	end
+end)
+UserInputService.InputEnded:Connect(function(i)
+	if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+		dragging = false
+	end
+end)
+
+local function makeButton(text, order)
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.new(1, -30, 0, 30)
+	btn.BackgroundColor3 = PANEL
+	btn.Text = text
+	btn.Font = Enum.Font.Michroma
+	btn.TextSize = 12
+	btn.TextColor3 = CYAN
+	btn.AutoButtonColor = false
+	btn.LayoutOrder = order
+	btn.Parent = window
+	round(btn, 6)
+	local s = stroke(btn, CYAN)
+	return btn, s
+end
+
+-- slider de força
+local sliderHolder = Instance.new("Frame")
+sliderHolder.Size = UDim2.new(1, -30, 0, 44)
+sliderHolder.BackgroundTransparency = 1
+sliderHolder.LayoutOrder = 1
+sliderHolder.Parent = window
+
+local powerLabel = Instance.new("TextLabel")
+powerLabel.Size = UDim2.new(1, 0, 0, 18)
+powerLabel.BackgroundTransparency = 1
+powerLabel.Font = Enum.Font.Code
+powerLabel.TextSize = 13
+powerLabel.TextColor3 = Color3.fromRGB(235, 235, 245)
+powerLabel.TextXAlignment = Enum.TextXAlignment.Left
+powerLabel.Parent = sliderHolder
+
+local track = Instance.new("Frame")
+track.Size = UDim2.new(1, 0, 0, 8)
+track.Position = UDim2.fromOffset(0, 28)
+track.BackgroundColor3 = PANEL
+track.Parent = sliderHolder
+round(track, 4)
+
+local fill = Instance.new("Frame")
+fill.BackgroundColor3 = RED
+fill.Parent = track
+round(fill, 4)
+
+-- botões de preset
+local presetButtons = {}
+local presetOrder = { { "Baixo", "BAIXO" }, { "Medio", "MÉDIO" }, { "Alto", "ALTO" } }
+
+local function setPower(v)
+	power = math.clamp(math.floor(v + 0.5), 1, 100)
+	fill.Size = UDim2.new(power / 100, 0, 1, 0)
+	powerLabel.Text = "FORÇA: " .. power .. "%"
+	for id, data in pairs(presetButtons) do
+		local active = (CONFIG.PRESETS[id] == power)
+		data.btn.BackgroundColor3 = active and RED or PANEL
+		data.btn.TextColor3 = active and Color3.new(1, 1, 1) or CYAN
+		data.stroke.Color = active and RED or CYAN
+	end
+end
+
+for i, p in ipairs(presetOrder) do
+	local btn, s = makeButton(p[2], 1 + i)
+	presetButtons[p[1]] = { btn = btn, stroke = s }
+	btn.MouseButton1Click:Connect(function()
+		setPower(CONFIG.PRESETS[p[1]])
+	end)
+end
+
+-- liga/desliga o arremesso
+local armBtn, armStroke = makeButton("ARREMESSO: ON", 10)
+armBtn.MouseButton1Click:Connect(function()
+	armed = not armed
+	armBtn.Text = "ARREMESSO: " .. (armed and "ON" or "OFF")
+	armBtn.TextColor3 = armed and RED or CYAN
+	armStroke.Color = armed and RED or CYAN
+end)
+armBtn.TextColor3 = RED
+armStroke.Color = RED
 
 local hint = Instance.new("TextLabel")
-hint.Size = UDim2.new(1, 0, 0, 20)
-hint.Position = UDim2.fromOffset(0, 150)
+hint.Size = UDim2.new(1, -20, 0, 28)
 hint.BackgroundTransparency = 1
 hint.Text = "Clique em um jogador para arremessar"
 hint.Font = Enum.Font.Code
 hint.TextSize = 11
 hint.TextColor3 = Color3.fromRGB(170, 170, 190)
-hint.Parent = frame
+hint.TextWrapped = true
+hint.LayoutOrder = 11
+hint.Parent = window
 
-local buttons = {}
-local options = {
-	{ id = "Baixo", label = "BAIXO" },
-	{ id = "Medio", label = "MÉDIO" },
-	{ id = "Alto",  label = "ALTO" },
-}
-
-local function refresh()
-	for id, btn in pairs(buttons) do
-		local active = (id == selected)
-		TweenService:Create(btn, TweenInfo.new(0.15), {
-			BackgroundColor3 = active and RED or Color3.fromRGB(25, 25, 38),
-			TextColor3 = active and Color3.new(1, 1, 1) or CYAN,
-		}):Play()
-		btn.UIStroke.Color = active and RED or CYAN
+-- slider (arrastar)
+local sliding = false
+local function updateSlider(x)
+	setPower(1 + math.clamp((x - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1) * 99)
+end
+track.InputBegan:Connect(function(i)
+	if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+		sliding = true
+		updateSlider(i.Position.X)
 	end
-end
+end)
+UserInputService.InputChanged:Connect(function(i)
+	if sliding and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+		updateSlider(i.Position.X)
+	end
+end)
+UserInputService.InputEnded:Connect(function(i)
+	if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+		sliding = false
+	end
+end)
 
-for i, opt in ipairs(options) do
-	local btn = Instance.new("TextButton")
-	btn.Size = UDim2.new(1, -30, 0, 32)
-	btn.Position = UDim2.fromOffset(15, 40 + (i - 1) * 36)
-	btn.Text = opt.label
-	btn.Font = Enum.Font.Michroma
-	btn.TextSize = 12
-	btn.AutoButtonColor = false
-	btn.Parent = frame
-	Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
-	local s = Instance.new("UIStroke", btn)
-	s.Thickness = 1.5
-	btn.MouseButton1Click:Connect(function()
-		selected = opt.id
-		refresh()
-	end)
-	buttons[opt.id] = btn
-end
-refresh()
+setPower(power)
 
--- 🎯 CLIQUE PARA ARREMESSAR
-mouse.Button1Down:Connect(function()
+-- 🎯 clique para arremessar
+UserInputService.InputBegan:Connect(function(input, processed)
+	if processed or not armed then return end
+	if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
+
 	local target = mouse.Target
-	if not target then return end
-	local model = target:FindFirstAncestorOfClass("Model")
+	local model = target and target:FindFirstAncestorOfClass("Model")
 	local targetPlayer = model and Players:GetPlayerFromCharacter(model)
 	if targetPlayer and targetPlayer ~= player then
-		event:FireServer(targetPlayer, selected)
+		remote:FireServer(targetPlayer, power)
 	end
 end)
