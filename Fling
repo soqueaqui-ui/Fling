@@ -1,9 +1,16 @@
+-- FlingMenu (LocalScript)
+-- Coloque em: StarterPlayer > StarterPlayerScripts
+-- Menu idêntico ao seu. O fling antigo foi removido: agora o menu só avisa o
+-- servidor (RemoteEvent "FlingSettings") sobre a força e o ON/OFF.
+-- Requer o Script "FlingServer_Script" em ServerScriptService.
+
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
+local flingRemote = ReplicatedStorage:WaitForChild("FlingSettings")
 
 -- Cores
 local RED = Color3.fromRGB(255, 40, 60)
@@ -13,22 +20,22 @@ local PANEL = Color3.fromRGB(25, 25, 38)
 local TEXT = Color3.fromRGB(235, 235, 245)
 
 -- Configurações
-local HIT_RANGE = 6          -- distância para contar como "encostou"
-local HIT_COOLDOWN = 0.6     -- segundos antes de arremessar o mesmo jogador de novo
-local MAX_SPEED = 450        -- limite de velocidade (evita sair do mapa)
 local TOGGLE_KEY = Enum.KeyCode.F
 
 local power = 50
 local enabled = true
 
-local rng = Random.new()
-local lastHit = {}           -- [Player] = tick() do último arremesso
 local connections = {}       -- todas as conexões, para limpar depois
 
 local function connect(signal, fn)
 	local c = signal:Connect(fn)
 	table.insert(connections, c)
 	return c
+end
+
+-- Envia a configuração atual para o servidor
+local function sync()
+	flingRemote:FireServer(enabled, power)
 end
 
 local function isPress(i)
@@ -239,6 +246,7 @@ end
 local function toggle()
 	enabled = not enabled
 	applyToggleVisual()
+	sync()
 end
 
 connect(toggleBtn.MouseButton1Click, toggle)
@@ -283,65 +291,11 @@ connect(UserInputService.InputChanged, function(i)
 	end
 end)
 connect(UserInputService.InputEnded, function(i)
-	if isPress(i) then sliding = false end
+	if isPress(i) and sliding then
+		sliding = false
+		sync() -- manda a força final quando soltar o slider
+	end
 end)
 
 setPower(power)
-
--- Limpa o registro de cooldown de quem saiu do jogo
-connect(Players.PlayerRemoving, function(p)
-	lastHit[p] = nil
-end)
-
--- 💥 Lógica do Touch Fling (quando alguém encosta em você)
-local function getRoot(p)
-	local char = p.Character
-	return char and char:FindFirstChild("HumanoidRootPart")
-end
-
-connect(RunService.Stepped, function()
-	if not enabled then return end
-
-	local root = getRoot(player)
-	if not root then return end
-
-	local now = os.clock()
-	local rangeSq = HIT_RANGE * HIT_RANGE
-
-	for _, other in ipairs(Players:GetPlayers()) do
-		if other ~= player then
-			local oRoot = getRoot(other)
-			if oRoot and now - (lastHit[other] or 0) >= HIT_COOLDOWN then
-				local offset = oRoot.Position - root.Position
-				if offset.X * offset.X + offset.Y * offset.Y + offset.Z * offset.Z <= rangeSq then
-					lastHit[other] = now
-
-					-- Direção horizontal: sempre para longe de você
-					local flat = Vector3.new(offset.X, 0, offset.Z)
-					local dir
-					if flat.Magnitude > 0.01 then
-						dir = flat.Unit
-					else
-						local a = rng:NextNumber(0, math.pi * 2)
-						dir = Vector3.new(math.cos(a), 0, math.sin(a))
-					end
-
-					local horizontal = power * 4
-					local vertical = power * 1.2
-					local vel = dir * horizontal + Vector3.new(0, vertical, 0)
-					if vel.Magnitude > MAX_SPEED then
-						vel = vel.Unit * MAX_SPEED
-					end
-
-					local spin = power * 0.2
-					oRoot.AssemblyLinearVelocity = vel
-					oRoot.AssemblyAngularVelocity = Vector3.new(
-						rng:NextNumber(-spin, spin),
-						rng:NextNumber(-spin, spin),
-						rng:NextNumber(-spin, spin)
-					)
-				end
-			end
-		end
-	end
-end)
+sync() -- manda a configuração inicial (liga o fling no servidor)
