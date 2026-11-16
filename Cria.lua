@@ -20,7 +20,7 @@ local TEXT = Color3.fromRGB(235, 235, 245)
 
 -- Configurações
 local TOGGLE_KEY = Enum.KeyCode.F
-local FORCE_SCALE = 200   -- impulso = força x FORCE_SCALE (força 50 = 10000, igual ao VIP)
+local FORCE_SCALE = 10    -- impulso = força x FORCE_SCALE (força 50 = 500, força 100 = 1000)
 
 local power = 50
 local enabled = true
@@ -307,7 +307,7 @@ task.spawn(function()
 				local vel = hrp.AssemblyLinearVelocity
 
 				-- 1) impulso gigante no frame de física
-				hrp.AssemblyLinearVelocity = vel * impulse + Vector3.new(0, impulse, 0)
+				hrp.AssemblyLinearVelocity = vel + Vector3.new(0, impulse, 0)
 				RunService.RenderStepped:Wait()
 
 				-- 2) restaura a velocidade original
