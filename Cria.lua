@@ -1,16 +1,15 @@
--- FlingMenu (LocalScript)
+-- Touch Fling (LocalScript ÚNICO)
 -- Coloque em: StarterPlayer > StarterPlayerScripts
--- Menu idêntico ao seu. O fling antigo foi removido: agora o menu só avisa o
--- servidor (RemoteEvent "FlingSettings") sobre a força e o ON/OFF.
--- Requer o Script "FlingServer_Script" em ServerScriptService.
+-- Menu futurista vermelho/ciano ORIGINAL, sem mudanças visuais.
+-- O fling agora usa o método do script VIP (impulso no seu personagem),
+-- com a força definida pelo slider (1 a 100). Não precisa de mais nenhum script.
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
-local flingRemote = ReplicatedStorage:WaitForChild("FlingSettings")
 
 -- Cores
 local RED = Color3.fromRGB(255, 40, 60)
@@ -21,6 +20,7 @@ local TEXT = Color3.fromRGB(235, 235, 245)
 
 -- Configurações
 local TOGGLE_KEY = Enum.KeyCode.F
+local FORCE_SCALE = 200   -- impulso = força x FORCE_SCALE (força 50 = 10000, igual ao VIP)
 
 local power = 50
 local enabled = true
@@ -31,11 +31,6 @@ local function connect(signal, fn)
 	local c = signal:Connect(fn)
 	table.insert(connections, c)
 	return c
-end
-
--- Envia a configuração atual para o servidor
-local function sync()
-	flingRemote:FireServer(enabled, power)
 end
 
 local function isPress(i)
@@ -246,7 +241,6 @@ end
 local function toggle()
 	enabled = not enabled
 	applyToggleVisual()
-	sync()
 end
 
 connect(toggleBtn.MouseButton1Click, toggle)
@@ -291,11 +285,43 @@ connect(UserInputService.InputChanged, function(i)
 	end
 end)
 connect(UserInputService.InputEnded, function(i)
-	if isPress(i) and sliding then
-		sliding = false
-		sync() -- manda a força final quando soltar o slider
-	end
+	if isPress(i) then sliding = false end
 end)
 
 setPower(power)
-sync() -- manda a configuração inicial (liga o fling no servidor)
+
+-- 💥 Touch Fling (método do VIP): a cada frame o seu personagem recebe um
+-- impulso enorme por um instante e volta ao normal. Quem encostar voa longe.
+task.spawn(function()
+	local movel = 0.1
+
+	while gui.Parent do
+		RunService.Heartbeat:Wait()
+
+		if enabled then
+			local char = player.Character
+			local hrp = char and char:FindFirstChild("HumanoidRootPart")
+
+			if hrp then
+				local impulse = power * FORCE_SCALE
+				local vel = hrp.AssemblyLinearVelocity
+
+				-- 1) impulso gigante no frame de física
+				hrp.AssemblyLinearVelocity = vel * impulse + Vector3.new(0, impulse, 0)
+				RunService.RenderStepped:Wait()
+
+				-- 2) restaura a velocidade original
+				if hrp.Parent then
+					hrp.AssemblyLinearVelocity = vel
+				end
+				RunService.Stepped:Wait()
+
+				-- 3) micro-oscilação para manter o contato ativo
+				if hrp.Parent then
+					hrp.AssemblyLinearVelocity = vel + Vector3.new(0, movel, 0)
+				end
+				movel = -movel
+			end
+		end
+	end
+end)
